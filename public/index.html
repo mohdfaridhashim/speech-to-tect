@@ -1,0 +1,549 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Malay-English Speech-to-Text with Socket.IO</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        
+        body {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            padding: 20px;
+        }
+        
+        .container {
+            background-color: rgba(255, 255, 255, 0.9);
+            border-radius: 20px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            width: 90%;
+            max-width: 800px;
+            padding: 30px;
+            text-align: center;
+        }
+        
+        h1 {
+            color: #333;
+            margin-bottom: 20px;
+            font-size: 2.5rem;
+        }
+        
+        .description {
+            color: #555;
+            margin-bottom: 30px;
+            font-size: 1.1rem;
+            line-height: 1.6;
+        }
+        
+        .connection-status {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 20px;
+            gap: 10px;
+        }
+        
+        .status-dot {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background-color: #ccc;
+        }
+        
+        .status-dot.connected {
+            background-color: #2ecc71;
+            box-shadow: 0 0 10px #2ecc71;
+        }
+        
+        .status-text {
+            font-size: 0.9rem;
+            color: #666;
+        }
+        
+        .language-options {
+            display: flex;
+            justify-content: center;
+            gap: 20px;
+            margin-bottom: 30px;
+        }
+        
+        .language-btn {
+            padding: 12px 25px;
+            background-color: #6c5ce7;
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+        
+        .language-btn.active {
+            background-color: #fd9644;
+            transform: scale(1.05);
+        }
+        
+        .language-btn:hover {
+            background-color: #fd9644;
+        }
+        
+        .controls {
+            margin-bottom: 30px;
+        }
+        
+        .record-btn {
+            padding: 15px 40px;
+            background-color: #fc5c65;
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            font-size: 1.2rem;
+            transition: all 0.3s ease;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+        }
+        
+        .record-btn:hover {
+            background-color: #eb3b5b;
+            transform: scale(1.05);
+        }
+        
+        .record-btn.recording {
+            background-color: #eb3b5b;
+            animation: pulse 1.5s infinite;
+        }
+        
+        @keyframes pulse {
+            0% {
+                transform: scale(1);
+            }
+            50% {
+                transform: scale(1.05);
+            }
+            100% {
+                transform: scale(1);
+            }
+        }
+        
+        .record-btn .icon {
+            margin-right: 10px;
+            font-size: 1.5rem;
+        }
+        
+        .output-container {
+            background-color: white;
+            border-radius: 15px;
+            padding: 20px;
+            margin-bottom: 20px;
+            text-align: left;
+            min-height: 200px;
+            max-height: 300px;
+            overflow-y: auto;
+            box-shadow: inset 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+        
+        #transcript {
+            font-size: 1.2rem;
+            line-height: 1.6;
+            color: #333;
+        }
+        
+        .highlight-malay {
+            color: #6c5ce7;
+            font-weight: 600;
+        }
+        
+        .highlight-english {
+            color: #fd9644;
+            font-weight: 600;
+        }
+        
+        .action-buttons {
+            display: flex;
+            justify-content: center;
+            gap: 15px;
+            margin-top: 20px;
+        }
+        
+        .action-btn {
+            padding: 12px 25px;
+            background-color: #2bcbba;
+            color: white;
+            border: none;
+            border-radius: 50px;
+            cursor: pointer;
+            font-size: 1rem;
+            transition: all 0.3s ease;
+        }
+        
+        .action-btn:hover {
+            background-color: #20bf6b;
+            transform: scale(1.05);
+        }
+        
+        .server-response {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: rgba(108, 92, 231, 0.1);
+            border-radius: 10px;
+            text-align: left;
+        }
+        
+        .server-response h3 {
+            color: #6c5ce7;
+            margin-bottom: 10px;
+        }
+        
+        #serverMessage {
+            color: #555;
+            font-style: italic;
+        }
+        
+        .tips {
+            margin-top: 30px;
+            padding: 15px;
+            background-color: rgba(108, 92, 231, 0.1);
+            border-radius: 10px;
+            text-align: left;
+        }
+        
+        .tips h3 {
+            color: #6c5ce7;
+            margin-bottom: 10px;
+        }
+        
+        .tips ul {
+            list-style-type: none;
+            padding-left: 20px;
+        }
+        
+        .tips li {
+            margin-bottom: 8px;
+            position: relative;
+        }
+        
+        .tips li:before {
+            content: "•";
+            color: #6c5ce7;
+            font-weight: bold;
+            display: inline-block;
+            width: 1em;
+            margin-left: -1em;
+        }
+        
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2rem;
+            }
+            
+            .language-options {
+                flex-direction: column;
+                gap: 10px;
+            }
+            
+            .record-btn {
+                padding: 12px 30px;
+                font-size: 1.1rem;
+            }
+            
+            .action-buttons {
+                flex-direction: column;
+                gap: 10px;
+            }
+        }
+    </style>
+    <!-- Include Socket.IO client library -->
+    <script src="https://cdn.socket.io/4.5.0/socket.io.min.js" integrity="sha384-7EyYLQZgWBi67fBtVxw60/OWl1kjsfrPFcaU0pp0nAh+i8FD068QogUvg85Ewy1k" crossorigin="anonymous"></script>
+</head>
+<body>
+    <div class="container">
+        <h1>Mixed Language Speech-to-Text</h1>
+        <p class="description">This tool recognizes mixed Malay-English speech, commonly known as "Manglish". Click the microphone button and start speaking.</p>
+        
+        <div class="connection-status">
+            <div class="status-dot" id="statusDot"></div>
+            <span class="status-text" id="statusText">Connecting to server...</span>
+        </div>
+        
+        <div class="language-options">
+            <button class="language-btn active" id="malay-english">Malay-English</button>
+            <button class="language-btn" id="english-only">English Only</button>
+            <button class="language-btn" id="malay-only">Malay Only</button>
+        </div>
+        
+        <div class="controls">
+            <button class="record-btn" id="recordButton">
+                <span class="icon">🎤</span>
+                <span id="buttonText">Start Recording</span>
+            </button>
+        </div>
+        
+        <div class="output-container">
+            <div id="transcript">Your speech will appear here...</div>
+        </div>
+        
+        <div class="action-buttons">
+            <button class="action-btn" id="copyButton">Copy Text</button>
+            <button class="action-btn" id="clearButton">Clear Text</button>
+            <button class="action-btn" id="saveButton">Save Text</button>
+        </div>
+        
+        <div class="server-response">
+            <h3>Server Response</h3>
+            <div id="serverMessage">Waiting for connection...</div>
+        </div>
+        
+        <div class="tips">
+            <h3>Tips for better recognition:</h3>
+            <ul>
+                <li>Speak clearly at a moderate pace</li>
+                <li>Reduce background noise when possible</li>
+                <li>Use common Malay-English混合 phrases like "I pergi to the mall"</li>
+                <li>Keep sentences short and pause between phrases</li>
+            </ul>
+        </div>
+    </div>
+
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            const recordButton = document.getElementById('recordButton');
+            const buttonText = document.getElementById('buttonText');
+            const transcript = document.getElementById('transcript');
+            const copyButton = document.getElementById('copyButton');
+            const clearButton = document.getElementById('clearButton');
+            const saveButton = document.getElementById('saveButton');
+            const languageButtons = document.querySelectorAll('.language-btn');
+            const statusDot = document.getElementById('statusDot');
+            const statusText = document.getElementById('statusText');
+            const serverMessage = document.getElementById('serverMessage');
+            
+            let recognition;
+            let isRecording = false;
+            let currentLanguage = 'malay-english';
+            let socket;
+            
+            // Initialize Socket.IO connection
+            function initSocket() {
+                // Connect to the server
+                socket = io('http://localhost:3000');
+                
+                socket.on('connect', () => {
+                    statusDot.classList.add('connected');
+                    statusText.textContent = 'Connected to server';
+                    serverMessage.textContent = 'Server ready for speech recognition';
+                });
+                
+                socket.on('disconnect', () => {
+                    statusDot.classList.remove('connected');
+                    statusText.textContent = 'Disconnected from server';
+                    serverMessage.textContent = 'Connection lost. Please refresh the page.';
+                });
+                
+                socket.on('transcription_result', (data) => {
+                    // Process the server's transcription
+                    const processedTranscript = processMixedLanguage(data.transcript);
+                    document.getElementById('transcript').innerHTML = processedTranscript;
+                    serverMessage.textContent = `Received transcription: ${data.transcript}`;
+                });
+                
+                socket.on('error', (error) => {
+                    serverMessage.textContent = `Server error: ${error.message}`;
+                });
+                
+                socket.on('language_update', (data) => {
+                    serverMessage.textContent = `Language preference updated to: ${data.language}`;
+                });
+            }
+            
+            // Check if the browser supports the Web Speech API
+            if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+                recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
+                recognition.continuous = true;
+                recognition.interimResults = true;
+                
+                recognition.onstart = function() {
+                    isRecording = true;
+                    recordButton.classList.add('recording');
+                    buttonText.textContent = 'Recording...';
+                    serverMessage.textContent = "Recording started. Speak now...";
+                };
+                
+                recognition.onresult = function(event) {
+                    let interimTranscript = '';
+                    let finalTranscript = '';
+                    
+                    for (let i = event.resultIndex; i < event.results.length; i++) {
+                        const transcript = event.results[i][0].transcript;
+                        if (event.results[i].isFinal) {
+                            finalTranscript += transcript;
+                        } else {
+                            interimTranscript += transcript;
+                        }
+                    }
+                    
+                    // Process the transcript for mixed language
+                    if (finalTranscript) {
+                        // Send to server for processing
+                        socket.emit('audio_data', {
+                            transcript: finalTranscript,
+                            language: currentLanguage
+                        });
+                    } else {
+                        const processedTranscript = processMixedLanguage(interimTranscript);
+                        document.getElementById('transcript').innerHTML = processedTranscript;
+                    }
+                };
+                
+                recognition.onerror = function(event) {
+                    console.error('Speech recognition error', event.error);
+                    serverMessage.textContent = `Error: ${event.error}`;
+                    stopRecording();
+                };
+                
+                recognition.onend = function() {
+                    stopRecording();
+                    serverMessage.textContent = "Recording stopped";
+                };
+            } else {
+                alert('Speech Recognition API is not supported in this browser. Try Chrome or Edge.');
+                recordButton.disabled = true;
+                serverMessage.textContent = "Browser doesn't support Speech Recognition API";
+            }
+            
+            recordButton.addEventListener('click', function() {
+                if (isRecording) {
+                    stopRecording();
+                } else {
+                    startRecording();
+                }
+            });
+            
+            languageButtons.forEach(button => {
+                button.addEventListener('click', function() {
+                    languageButtons.forEach(btn => btn.classList.remove('active'));
+                    this.classList.add('active');
+                    currentLanguage = this.id;
+                    
+                    // Send language preference to server
+                    socket.emit('language_change', {
+                        language: currentLanguage
+                    });
+                });
+            });
+            
+            copyButton.addEventListener('click', function() {
+                const textToCopy = transcript.innerText;
+                navigator.clipboard.writeText(textToCopy)
+                    .then(() => {
+                        serverMessage.textContent = 'Text copied to clipboard!';
+                        setTimeout(() => {
+                            serverMessage.textContent = 'Ready for next command';
+                        }, 2000);
+                    })
+                    .catch(err => {
+                        console.error('Failed to copy text: ', err);
+                        serverMessage.textContent = 'Failed to copy text to clipboard';
+                    });
+            });
+            
+            clearButton.addEventListener('click', function() {
+                transcript.innerHTML = 'Your speech will appear here...';
+                serverMessage.textContent = 'Text cleared';
+            });
+            
+            saveButton.addEventListener('click', function() {
+                const textToSave = transcript.innerText;
+                const blob = new Blob([textToSave], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'malay-english-transcript.txt';
+                document.body.appendChild(a);
+                a.click();
+                
+                // Clean up
+                setTimeout(() => {
+                    document.body.removeChild(a);
+                    URL.revokeObjectURL(url);
+                    serverMessage.textContent = 'Text saved to file';
+                }, 100);
+            });
+            
+            function startRecording() {
+                try {
+                    recognition.start();
+                } catch (error) {
+                    console.error('Recognition start error:', error);
+                    serverMessage.textContent = `Error starting recording: ${error.message}`;
+                    stopRecording();
+                }
+            }
+            
+            function stopRecording() {
+                isRecording = false;
+                recordButton.classList.remove('recording');
+                buttonText.textContent = 'Start Recording';
+                recognition.stop();
+            }
+            
+            function processMixedLanguage(text) {
+                // This is a simplified version for demonstration
+                // A real implementation would use more sophisticated NLP techniques
+                
+                // Common Malay words and phrases
+                const malayWords = [
+                    'saya', 'awak', 'kamu', 'dia', 'mereka', 'kita', 
+                    'ini', 'itu', 'sini', 'sana', 
+                    'pergi', 'makan', 'minum', 'tidur', 'baca', 'tulis',
+                    'rumah', 'kereta', 'makanan', 'minuman', 
+                    'hari', 'malam', 'pagi', 'petang',
+                    'terima kasih', 'selamat pagi', 'selamat malam',
+                    'ya', 'tidak', 'boleh', 'jom', 'lah', 'pun'
+                ];
+                
+                // Common English words
+                const englishWords = [
+                    'I', 'you', 'he', 'she', 'we', 'they', 
+                    'this', 'that', 'here', 'there',
+                    'go', 'eat', 'drink', 'sleep', 'read', 'write',
+                    'house', 'car', 'food', 'drink',
+                    'day', 'night', 'morning', 'evening',
+                    'thank you', 'good morning', 'good night',
+                    'yes', 'no', 'can', 'let\'s'
+                ];
+                
+                // Split text into words and process each word
+                const words = text.split(/\s+/);
+                const processedWords = words.map(word => {
+                    const cleanWord = word.replace(/[.,?!;:'"]/g, '').toLowerCase();
+                    
+                    if (malayWords.includes(cleanWord)) {
+                        return `<span class="highlight-malay">${word}</span>`;
+                    } else if (englishWords.includes(cleanWord)) {
+                        return `<span class="highlight-english">${word}</span>`;
+                    }
+                    
+                    return word;
+                });
+                
+                return processedWords.join(' ');
+            }
+            
+            // Initialize the Socket.IO connection
+            initSocket();
+        });
+    </script>
+</body>
+</html>
