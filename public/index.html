@@ -320,229 +320,152 @@
             const recordButton = document.getElementById('recordButton');
             const buttonText = document.getElementById('buttonText');
             const transcript = document.getElementById('transcript');
-            const copyButton = document.getElementById('copyButton');
-            const clearButton = document.getElementById('clearButton');
-            const saveButton = document.getElementById('saveButton');
-            const languageButtons = document.querySelectorAll('.language-btn');
             const statusDot = document.getElementById('statusDot');
             const statusText = document.getElementById('statusText');
             const serverMessage = document.getElementById('serverMessage');
             
             let recognition;
             let isRecording = false;
-            let currentLanguage = 'malay-english';
             let socket;
-            
-            // Initialize Socket.IO connection
+            let mediaRecorder;
+            let audioChunks = [];
+
             function initSocket() {
-                // Connect to the server
                 socket = io('http://localhost:3000');
                 
                 socket.on('connect', () => {
                     statusDot.classList.add('connected');
                     statusText.textContent = 'Connected to server';
-                    serverMessage.textContent = 'Server ready for speech recognition';
+                    serverMessage.textContent = 'Ready for speech recognition.';
                 });
                 
                 socket.on('disconnect', () => {
                     statusDot.classList.remove('connected');
-                    statusText.textContent = 'Disconnected from server';
-                    serverMessage.textContent = 'Connection lost. Please refresh the page.';
+                    statusText.textContent = 'Disconnected';
                 });
                 
                 socket.on('transcription_result', (data) => {
-                    // Process the server's transcription
-                    const processedTranscript = processMixedLanguage(data.transcript);
-                    document.getElementById('transcript').innerHTML = processedTranscript;
-                    serverMessage.textContent = `Received transcription: ${data.transcript}`;
+                    const finalTranscript = data.transcript || "[No speech detected]";
+                    const p = document.createElement('p');
+                    p.innerHTML = processMixedLanguage(finalTranscript);
+
+                    if (transcript.innerHTML.includes('Your speech will appear here...')) {
+                        transcript.innerHTML = '';
+                    }
+                    transcript.appendChild(p);
+                    transcript.scrollTop = transcript.scrollHeight; // Auto-scroll
                 });
                 
-                socket.on('error', (error) => {
-                    serverMessage.textContent = `Server error: ${error.message}`;
-                });
-                
-                socket.on('language_update', (data) => {
-                    serverMessage.textContent = `Language preference updated to: ${data.language}`;
+                socket.on('transcription_error', (error) => {
+                    serverMessage.textContent = `Error: ${error.message}`;
                 });
             }
             
-            // Check if the browser supports the Web Speech API
+            async function setupAudio() {
+                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                    mediaRecorder = new MediaRecorder(stream);
+
+                    mediaRecorder.ondataavailable = (event) => {
+                        audioChunks.push(event.data);
+                    };
+
+                    mediaRecorder.onstop = () => {
+                        if (audioChunks.length === 0) {
+                            console.log("No audio chunks recorded.");
+                            return;
+                        }
+
+                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                        const reader = new FileReader();
+
+                        reader.onload = () => {
+                            const arrayBuffer = reader.result;
+                            const audioContext = new AudioContext({ sampleRate: 16000 });
+                            audioContext.decodeAudioData(arrayBuffer)
+                                .then(buffer => {
+                                    const audioFloat32 = buffer.getChannelData(0);
+                                    console.log(`Sending audio data of length: ${audioFloat32.length}`);
+                                    socket.emit('audio_data', {
+                                        audioFloat32: Array.from(audioFloat32)
+                                    });
+                                })
+                                .catch(e => console.error("Error decoding audio data:", e));
+                        };
+                        
+                        reader.readAsArrayBuffer(audioBlob);
+                        audioChunks = []; // Reset for next recording
+                    };
+                } else {
+                    console.error("getUserMedia not supported on your browser!");
+                }
+            }
+            
             if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
                 recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
                 recognition.continuous = true;
                 recognition.interimResults = true;
-                
-                recognition.onstart = function() {
-                    isRecording = true;
-                    recordButton.classList.add('recording');
-                    buttonText.textContent = 'Recording...';
-                    serverMessage.textContent = "Recording started. Speak now...";
+
+                recognition.onstart = () => {
+                    mediaRecorder.start();
                 };
-                
-                recognition.onresult = function(event) {
-                    let interimTranscript = '';
-                    let finalTranscript = '';
-                    
-                    for (let i = event.resultIndex; i < event.results.length; i++) {
-                        const transcript = event.results[i][0].transcript;
-                        if (event.results[i].isFinal) {
-                            finalTranscript += transcript;
-                        } else {
-                            interimTranscript += transcript;
-                        }
+
+                recognition.onresult = (event) => {
+                    let interim_transcript = '';
+                    for (let i = event.resultIndex; i < event.results.length; ++i) {
+                        // The 'isFinal' property is less reliable across browsers for this use case.
+                        // We will rely on our Whisper model for the final transcription.
+                        interim_transcript += event.results[i][0].transcript;
                     }
-                    
-                    // Process the transcript for mixed language
-                    if (finalTranscript) {
-                        // Send to server for processing
-                        socket.emit('audio_data', {
-                            transcript: finalTranscript,
-                            language: currentLanguage
-                        });
-                    } else {
-                        const processedTranscript = processMixedLanguage(interimTranscript);
-                        document.getElementById('transcript').innerHTML = processedTranscript;
+                    transcript.innerHTML = processMixedLanguage(interim_transcript);
+                };
+
+                recognition.onend = () => {
+                    // This is the key change: only stop the media recorder here
+                    if (mediaRecorder && mediaRecorder.state === "recording") {
+                        mediaRecorder.stop();
                     }
                 };
                 
-                recognition.onerror = function(event) {
-                    console.error('Speech recognition error', event.error);
-                    serverMessage.textContent = `Error: ${event.error}`;
-                    stopRecording();
+                recognition.onerror = (event) => {
+                    console.error("Speech Recognition Error:", event.error);
                 };
-                
-                recognition.onend = function() {
-                    stopRecording();
-                    serverMessage.textContent = "Recording stopped";
-                };
+
             } else {
-                alert('Speech Recognition API is not supported in this browser. Try Chrome or Edge.');
-                recordButton.disabled = true;
-                serverMessage.textContent = "Browser doesn't support Speech Recognition API";
+                alert('Speech Recognition API is not supported in this browser.');
             }
-            
-            recordButton.addEventListener('click', function() {
-                if (isRecording) {
-                    stopRecording();
-                } else {
-                    startRecording();
-                }
-            });
-            
-            languageButtons.forEach(button => {
-                button.addEventListener('click', function() {
-                    languageButtons.forEach(btn => btn.classList.remove('active'));
-                    this.classList.add('active');
-                    currentLanguage = this.id;
-                    
-                    // Send language preference to server
-                    socket.emit('language_change', {
-                        language: currentLanguage
-                    });
-                });
-            });
-            
-            copyButton.addEventListener('click', function() {
-                const textToCopy = transcript.innerText;
-                navigator.clipboard.writeText(textToCopy)
-                    .then(() => {
-                        serverMessage.textContent = 'Text copied to clipboard!';
-                        setTimeout(() => {
-                            serverMessage.textContent = 'Ready for next command';
-                        }, 2000);
-                    })
-                    .catch(err => {
-                        console.error('Failed to copy text: ', err);
-                        serverMessage.textContent = 'Failed to copy text to clipboard';
-                    });
-            });
-            
-            clearButton.addEventListener('click', function() {
-                transcript.innerHTML = 'Your speech will appear here...';
-                serverMessage.textContent = 'Text cleared';
-            });
-            
-            saveButton.addEventListener('click', function() {
-                const textToSave = transcript.innerText;
-                const blob = new Blob([textToSave], { type: 'text/plain' });
-                const url = URL.createObjectURL(blob);
-                
-                const a = document.createElement('a');
-                a.href = url;
-                a.download = 'malay-english-transcript.txt';
-                document.body.appendChild(a);
-                a.click();
-                
-                // Clean up
-                setTimeout(() => {
-                    document.body.removeChild(a);
-                    URL.revokeObjectURL(url);
-                    serverMessage.textContent = 'Text saved to file';
-                }, 100);
-            });
-            
+
             function startRecording() {
-                try {
-                    recognition.start();
-                } catch (error) {
-                    console.error('Recognition start error:', error);
-                    serverMessage.textContent = `Error starting recording: ${error.message}`;
-                    stopRecording();
-                }
+                isRecording = true;
+                recordButton.classList.add('recording');
+                buttonText.textContent = 'Stop Recording';
+                transcript.innerHTML = 'Listening...';
+                recognition.start();
             }
-            
+
             function stopRecording() {
                 isRecording = false;
                 recordButton.classList.remove('recording');
                 buttonText.textContent = 'Start Recording';
                 recognition.stop();
             }
-            
+
+            recordButton.addEventListener('click', () => {
+                if (isRecording) {
+                    stopRecording();
+                } else {
+                    startRecording();
+                }
+            });
+
+            // Simplified function
             function processMixedLanguage(text) {
-                // This is a simplified version for demonstration
-                // A real implementation would use more sophisticated NLP techniques
-                
-                // Common Malay words and phrases
-                const malayWords = [
-                    'saya', 'awak', 'kamu', 'dia', 'mereka', 'kita', 
-                    'ini', 'itu', 'sini', 'sana', 
-                    'pergi', 'makan', 'minum', 'tidur', 'baca', 'tulis',
-                    'rumah', 'kereta', 'makanan', 'minuman', 
-                    'hari', 'malam', 'pagi', 'petang',
-                    'terima kasih', 'selamat pagi', 'selamat malam',
-                    'ya', 'tidak', 'boleh', 'jom', 'lah', 'pun'
-                ];
-                
-                // Common English words
-                const englishWords = [
-                    'I', 'you', 'he', 'she', 'we', 'they', 
-                    'this', 'that', 'here', 'there',
-                    'go', 'eat', 'drink', 'sleep', 'read', 'write',
-                    'house', 'car', 'food', 'drink',
-                    'day', 'night', 'morning', 'evening',
-                    'thank you', 'good morning', 'good night',
-                    'yes', 'no', 'can', 'let\'s'
-                ];
-                
-                // Split text into words and process each word
-                const words = text.split(/\s+/);
-                const processedWords = words.map(word => {
-                    const cleanWord = word.replace(/[.,?!;:'"]/g, '').toLowerCase();
-                    
-                    if (malayWords.includes(cleanWord)) {
-                        return `<span class="highlight-malay">${word}</span>`;
-                    } else if (englishWords.includes(cleanWord)) {
-                        return `<span class="highlight-english">${word}</span>`;
-                    }
-                    
-                    return word;
-                });
-                
-                return processedWords.join(' ');
+                console.log(`text: ${text}`)
+                return text;
             }
-            
-            // Initialize the Socket.IO connection
+
             initSocket();
+            setupAudio();
         });
     </script>
 </body>
