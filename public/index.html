@@ -263,7 +263,6 @@
             }
         }
     </style>
-    <!-- Include Socket.IO client library -->
     <script src="https://cdn.socket.io/4.5.0/socket.io.min.js" integrity="sha384-7EyYLQZgWBi67fBtVxw60/OWl1kjsfrPFcaU0pp0nAh+i8FD068QogUvg85Ewy1k" crossorigin="anonymous"></script>
 </head>
 <body>
@@ -323,12 +322,17 @@
             const statusDot = document.getElementById('statusDot');
             const statusText = document.getElementById('statusText');
             const serverMessage = document.getElementById('serverMessage');
+            const copyButton = document.getElementById('copyButton');
+            const clearButton = document.getElementById('clearButton');
+            const saveButton = document.getElementById('saveButton');
             
-            let recognition;
             let isRecording = false;
             let socket;
             let mediaRecorder;
             let audioChunks = [];
+            let audioStream;
+            let recordingInterval;
+            let selectedLanguage = 'malay-english';
 
             function initSocket() {
                 socket = io('http://localhost:3000');
@@ -342,114 +346,143 @@
                 socket.on('disconnect', () => {
                     statusDot.classList.remove('connected');
                     statusText.textContent = 'Disconnected';
+                    serverMessage.textContent = 'Disconnected from server.';
                 });
                 
                 socket.on('transcription_result', (data) => {
                     const finalTranscript = data.transcript || "[No speech detected]";
                     const p = document.createElement('p');
-                    p.innerHTML = processMixedLanguage(finalTranscript);
+                    
+                    // Directly use the processed HTML from Python
+                    p.innerHTML = finalTranscript;
+                    p.setAttribute('data-timestamp', new Date().toLocaleTimeString());
 
                     if (transcript.innerHTML.includes('Your speech will appear here...')) {
                         transcript.innerHTML = '';
                     }
                     transcript.appendChild(p);
-                    transcript.scrollTop = transcript.scrollHeight; // Auto-scroll
+                    transcript.scrollTop = transcript.scrollHeight;
+                    
+                    serverMessage.textContent = `Transcription received at ${new Date().toLocaleTimeString()}`;
                 });
                 
                 socket.on('transcription_error', (error) => {
                     serverMessage.textContent = `Error: ${error.message}`;
+                    console.error('Transcription error:', error);
                 });
             }
             
             async function setupAudio() {
-                if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
-                    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-                    mediaRecorder = new MediaRecorder(stream);
+                try {
+                    if (navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+                        audioStream = await navigator.mediaDevices.getUserMedia({ 
+                            audio: {
+                                channelCount: 1,
+                                sampleRate: 16000,
+                                sampleSize: 16,
+                                echoCancellation: true,
+                                noiseSuppression: true
+                            } 
+                        });
+                        
+                        const options = { mimeType: 'audio/webm; codecs=opus' };
+                        mediaRecorder = new MediaRecorder(audioStream, options);
+                        
+                        mediaRecorder.ondataavailable = (event) => {
+                            if (event.data.size > 0) {
+                                audioChunks.push(event.data);
+                            }
+                        };
 
-                    mediaRecorder.ondataavailable = (event) => {
-                        audioChunks.push(event.data);
-                    };
+                        mediaRecorder.onstop = async () => {
+                            if (audioChunks.length === 0) {
+                                console.log("No audio chunks recorded.");
+                                serverMessage.textContent = "No audio recorded.";
+                                return;
+                            }
 
-                    mediaRecorder.onstop = () => {
-                        if (audioChunks.length === 0) {
-                            console.log("No audio chunks recorded.");
-                            return;
-                        }
-
-                        const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                        const reader = new FileReader();
-
-                        reader.onload = () => {
-                            const arrayBuffer = reader.result;
-                            const audioContext = new AudioContext({ sampleRate: 16000 });
-                            audioContext.decodeAudioData(arrayBuffer)
-                                .then(buffer => {
-                                    const audioFloat32 = buffer.getChannelData(0);
-                                    console.log(`Sending audio data of length: ${audioFloat32.length}`);
-                                    socket.emit('audio_data', {
-                                        audioFloat32: Array.from(audioFloat32)
-                                    });
-                                })
-                                .catch(e => console.error("Error decoding audio data:", e));
+                            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                            await sendAudioToServer(audioBlob);
+                            audioChunks = [];
                         };
                         
-                        reader.readAsArrayBuffer(audioBlob);
-                        audioChunks = []; // Reset for next recording
-                    };
-                } else {
-                    console.error("getUserMedia not supported on your browser!");
+                        console.log("Audio setup completed successfully");
+                    } else {
+                        throw new Error("getUserMedia not supported on your browser!");
+                    }
+                } catch (error) {
+                    console.error("Error setting up audio:", error);
+                    serverMessage.textContent = `Audio setup error: ${error.message}`;
                 }
             }
             
-            if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
-                recognition = new (window.SpeechRecognition || window.webkitSpeechRecognition)();
-                recognition.continuous = true;
-                recognition.interimResults = true;
-
-                recognition.onstart = () => {
-                    mediaRecorder.start();
-                };
-
-                recognition.onresult = (event) => {
-                    let interim_transcript = '';
-                    for (let i = event.resultIndex; i < event.results.length; ++i) {
-                        // The 'isFinal' property is less reliable across browsers for this use case.
-                        // We will rely on our Whisper model for the final transcription.
-                        interim_transcript += event.results[i][0].transcript;
-                    }
-                    transcript.innerHTML = processMixedLanguage(interim_transcript);
-                };
-
-                recognition.onend = () => {
-                    // This is the key change: only stop the media recorder here
-                    if (mediaRecorder && mediaRecorder.state === "recording") {
-                        mediaRecorder.stop();
-                    }
-                };
-                
-                recognition.onerror = (event) => {
-                    console.error("Speech Recognition Error:", event.error);
-                };
-
-            } else {
-                alert('Speech Recognition API is not supported in this browser.');
+            async function sendAudioToServer(audioBlob) {
+                try {
+                    const arrayBuffer = await audioBlob.arrayBuffer();
+                    const audioContext = new (window.AudioContext || window.webkitAudioContext)({
+                        sampleRate: 16000
+                    });
+                    
+                    const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+                    const audioFloat32 = audioBuffer.getChannelData(0);
+                    
+                    console.log(`Sending audio data of length: ${audioFloat32.length}`);
+                    serverMessage.textContent = `Sending audio data (${audioFloat32.length} samples)...`;
+                    
+                    // Send language preference to Python
+                    socket.emit('audio_data', {
+                        audioFloat32: Array.from(audioFloat32),
+                        sampleRate: 16000,
+                        language: selectedLanguage
+                    });
+                    
+                } catch (error) {
+                    console.error("Error processing audio:", error);
+                    serverMessage.textContent = `Error processing audio: ${error.message}`;
+                }
             }
 
             function startRecording() {
+                if (!mediaRecorder) {
+                    serverMessage.textContent = "Audio not ready. Please wait...";
+                    return;
+                }
+                
                 isRecording = true;
                 recordButton.classList.add('recording');
                 buttonText.textContent = 'Stop Recording';
                 transcript.innerHTML = 'Listening...';
-                recognition.start();
+                audioChunks = [];
+                
+                mediaRecorder.start(1000);
+                
+                recordingInterval = setInterval(() => {
+                    if (mediaRecorder.state === 'recording') {
+                        mediaRecorder.requestData();
+                    }
+                }, 2000);
+                
+                serverMessage.textContent = "Recording started...";
             }
 
             function stopRecording() {
                 isRecording = false;
                 recordButton.classList.remove('recording');
                 buttonText.textContent = 'Start Recording';
-                recognition.stop();
+                
+                if (mediaRecorder && mediaRecorder.state === 'recording') {
+                    mediaRecorder.stop();
+                }
+                
+                if (recordingInterval) {
+                    clearInterval(recordingInterval);
+                    recordingInterval = null;
+                }
+                
+                serverMessage.textContent = "Processing audio...";
             }
 
+            // Event listeners
             recordButton.addEventListener('click', () => {
                 if (isRecording) {
                     stopRecording();
@@ -458,14 +491,57 @@
                 }
             });
 
-            // Simplified function
-            function processMixedLanguage(text) {
-                console.log(`text: ${text}`)
-                return text;
-            }
+            // Language button handlers
+            document.querySelectorAll('.language-btn').forEach(btn => {
+                btn.addEventListener('click', function() {
+                    document.querySelectorAll('.language-btn').forEach(b => b.classList.remove('active'));
+                    this.classList.add('active');
+                    selectedLanguage = this.id;
+                    serverMessage.textContent = `Language mode set to: ${this.textContent}`;
+                });
+            });
 
+            // Action button handlers
+            copyButton.addEventListener('click', () => {
+                const textToCopy = transcript.innerText;
+                navigator.clipboard.writeText(textToCopy).then(() => {
+                    serverMessage.textContent = "Text copied to clipboard!";
+                }).catch(err => {
+                    serverMessage.textContent = "Failed to copy text.";
+                    console.error('Copy failed:', err);
+                });
+            });
+
+            clearButton.addEventListener('click', () => {
+                transcript.innerHTML = 'Your speech will appear here...';
+                serverMessage.textContent = "Text cleared.";
+            });
+
+            saveButton.addEventListener('click', () => {
+                const textToSave = transcript.innerText;
+                const blob = new Blob([textToSave], { type: 'text/plain' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = 'transcription.txt';
+                a.click();
+                URL.revokeObjectURL(url);
+                serverMessage.textContent = "Text saved as transcription.txt";
+            });
+
+            // Initialize the application
             initSocket();
             setupAudio();
+            
+            // Cleanup on page unload
+            window.addEventListener('beforeunload', () => {
+                if (audioStream) {
+                    audioStream.getTracks().forEach(track => track.stop());
+                }
+                if (socket) {
+                    socket.disconnect();
+                }
+            });
         });
     </script>
 </body>
