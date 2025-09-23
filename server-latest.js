@@ -25,13 +25,14 @@ io.on('connection', (socket) => {
   });
 
   socket.on('audio_data', (data) => {
-    console.log(` Received audio from browser: ${socket.id}. Data length: ${data.audioFloat32.length}`);
+    console.log(`Received audio from browser: ${socket.id}. Data length: ${data.audioFloat32.length}, Language: ${data.language}`);
     
     if (pythonClientId) {
       console.log(`Relaying audio to Python client...`);
       io.to(pythonClientId).emit('audio_to_python', {
         audioFloat32: data.audioFloat32,
-        browserSocketId: socket.id
+        browserSocketId: socket.id,
+        language: data.language || 'malay-english'
       });
     } else {
       console.error("❌ Python client is not connected. Cannot transcribe.");
