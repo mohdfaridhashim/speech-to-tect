@@ -331,7 +331,6 @@
             let mediaRecorder;
             let audioChunks = [];
             let audioStream;
-            let recordingInterval;
             let selectedLanguage = 'malay-english';
 
             function initSocket() {
@@ -353,11 +352,10 @@
                     const finalTranscript = data.transcript || "[No speech detected]";
                     const p = document.createElement('p');
                     
-                    // Directly use the processed HTML from Python
                     p.innerHTML = finalTranscript;
                     p.setAttribute('data-timestamp', new Date().toLocaleTimeString());
 
-                    if (transcript.innerHTML.includes('Your speech will appear here...')) {
+                    if (transcript.innerHTML.includes('Your speech will appear here...') || transcript.innerHTML === 'Listening...') {
                         transcript.innerHTML = '';
                     }
                     transcript.appendChild(p);
@@ -391,19 +389,20 @@
                         mediaRecorder.ondataavailable = (event) => {
                             if (event.data.size > 0) {
                                 audioChunks.push(event.data);
+                                if (audioChunks.length >= 3) { // Send data every 3 chunks (approx. 3 seconds)
+                                    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                                    sendAudioToServer(audioBlob);
+                                    audioChunks = [];
+                                }
                             }
                         };
 
                         mediaRecorder.onstop = async () => {
-                            if (audioChunks.length === 0) {
-                                console.log("No audio chunks recorded.");
-                                serverMessage.textContent = "No audio recorded.";
-                                return;
+                            if (audioChunks.length > 0) {
+                                const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+                                await sendAudioToServer(audioBlob);
+                                audioChunks = [];
                             }
-
-                            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
-                            await sendAudioToServer(audioBlob);
-                            audioChunks = [];
                         };
                         
                         console.log("Audio setup completed successfully");
@@ -429,7 +428,6 @@
                     console.log(`Sending audio data of length: ${audioFloat32.length}`);
                     serverMessage.textContent = `Sending audio data (${audioFloat32.length} samples)...`;
                     
-                    // Send language preference to Python
                     socket.emit('audio_data', {
                         audioFloat32: Array.from(audioFloat32),
                         sampleRate: 16000,
@@ -454,13 +452,7 @@
                 transcript.innerHTML = 'Listening...';
                 audioChunks = [];
                 
-                mediaRecorder.start(1000);
-                
-                recordingInterval = setInterval(() => {
-                    if (mediaRecorder.state === 'recording') {
-                        mediaRecorder.requestData();
-                    }
-                }, 2000);
+                mediaRecorder.start(1000); // Collect 1-second chunks
                 
                 serverMessage.textContent = "Recording started...";
             }
@@ -474,15 +466,9 @@
                     mediaRecorder.stop();
                 }
                 
-                if (recordingInterval) {
-                    clearInterval(recordingInterval);
-                    recordingInterval = null;
-                }
-                
                 serverMessage.textContent = "Processing audio...";
             }
 
-            // Event listeners
             recordButton.addEventListener('click', () => {
                 if (isRecording) {
                     stopRecording();
@@ -491,7 +477,6 @@
                 }
             });
 
-            // Language button handlers
             document.querySelectorAll('.language-btn').forEach(btn => {
                 btn.addEventListener('click', function() {
                     document.querySelectorAll('.language-btn').forEach(b => b.classList.remove('active'));
@@ -501,7 +486,6 @@
                 });
             });
 
-            // Action button handlers
             copyButton.addEventListener('click', () => {
                 const textToCopy = transcript.innerText;
                 navigator.clipboard.writeText(textToCopy).then(() => {
@@ -529,11 +513,9 @@
                 serverMessage.textContent = "Text saved as transcription.txt";
             });
 
-            // Initialize the application
             initSocket();
             setupAudio();
             
-            // Cleanup on page unload
             window.addEventListener('beforeunload', () => {
                 if (audioStream) {
                     audioStream.getTracks().forEach(track => track.stop());
