@@ -1,0 +1,2 @@
+Raw: I left to beat rice.
+Processed: <span class='highlight-english'>I left to beat rice.</span>

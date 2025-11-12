@@ -3,45 +3,140 @@ const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
 
+// Read the comma-separated list from your .env file
+const ALLOWED_ORIGINS_STRING = process.env.ALLOWED_ORIGINS || "http://localhost:8010";
+
+// This is the line that "puts it into an array"
+const ALLOWED_ORIGINS_ARRAY = ALLOWED_ORIGINS_STRING.split(',');
+
+// Add a secret key to authenticate your Python client.
+const PYTHON_SECRET_KEY = "your-long-random-secret-key-here"; 
+
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: "*",
+    origin: ALLOWED_ORIGINS_ARRAY,
     methods: ["GET", "POST"]
   }
 });
 
-let pythonClientId = null;
+// [MODIFIED] Store backend clients by group
+let backendClients = {
+  whisper: null,
+  wave2vec: null, // Renamed from "wave2e"
+  store: null
+};
+
+// Create a map to rate-limit clients.
+const clientRateLimit = new Map();
 
 app.use(express.static(path.join(__dirname, 'public')));
 
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
 
-  socket.on('identify_python', () => {
-    pythonClientId = socket.id;
-    console.log(`✅ Python client identified: ${pythonClientId}`);
+  // Set a 1-second cooldown for this client
+  clientRateLimit.set(socket.id, 0);
+
+  // [MODIFIED] Handle identification for different backend groups
+  socket.on('identify_python', (data) => {
+    // Authenticate the Python client with the secret key AND group
+    if (data && data.secret === PYTHON_SECRET_KEY && data.group) {
+      
+      // Check if the group name is one we expect
+      if (backendClients.hasOwnProperty(data.group)) {
+        
+        // Assign this client to its group
+        backendClients[data.group] = socket.id;
+        
+        // [NEW] Tag the socket with its group for easy disconnect cleanup
+        socket.backendGroup = data.group; 
+        
+        console.log(`✅ Python client identified for group [${data.group}]: ${socket.id}`);
+        
+      } else {
+        console.error(`❌ Invalid group name from client ${socket.id}: ${data.group}`);
+        socket.disconnect();
+      }
+    } else {
+      // Log and disconnect the unauthorized client.
+      console.error(`❌ FAILED auth attempt from client: ${socket.id}`);
+      socket.disconnect();
+    }
   });
 
   socket.on('audio_data', (data) => {
-    console.log(`Received audio from browser: ${socket.id}. Data length: ${data.audioFloat32.length}, Language: ${data.language}`);
     
-    if (pythonClientId) {
-      console.log(`Relaying audio to Python client...`);
-      io.to(pythonClientId).emit('audio_to_python', {
-        audioFloat32: data.audioFloat32,
-        browserSocketId: socket.id,
-        language: data.language || 'malay-english'
-      });
-    } else {
-      console.error("❌ Python client is not connected. Cannot transcribe.");
-      socket.emit('transcription_error', { message: "Transcription service unavailable." });
+    // Add Rate Limiting.
+    const now = Date.now();
+    const lastRequestTime = clientRateLimit.get(socket.id) || 0;
+    
+    if (now - lastRequestTime < 1000) {
+      console.warn(`Rate limit hit for client: ${socket.id}`);
+      return; 
+    }
+    clientRateLimit.set(socket.id, now);
+
+    // Add Data Validation.
+    if (!data || !Array.isArray(data.audioFloat32) || !data.language) {
+      console.error(`Invalid data from browser: ${socket.id}`);
+      socket.emit('transcription_error', { message: "Invalid data format." });
+      return;
+    }
+
+    // [MODIFIED] Route audio to the correct backend groups
+    const payload = {
+      audioFloat32: data.audioFloat32,
+      browserSocketId: socket.id,
+      language: data.language
+    };
+
+    let transcriptionServiceUsed = false;
+
+    // 1. Always send to the 'store' group if it's connected
+    if (backendClients.store) {
+      console.log(`Relaying audio to 'store' client...`);
+      io.to(backendClients.store).emit('audio_to_python', payload);
+    }
+
+    // 2. Send to the correct transcription group based on language
+    if (payload.language === 'malay-english' || payload.language === 'malay-only') {
+      if (backendClients.whisper) {
+        console.log(`Relaying audio to 'whisper' client...`);
+        io.to(backendClients.whisper).emit('audio_to_python', payload);
+        transcriptionServiceUsed = true;
+      }
+    } else if (payload.language === 'english-only') {
+      if (backendClients.wave2vec) {
+        console.log(`Relaying audio to 'wave2vec' client...`);
+        io.to(backendClients.wave2vec).emit('audio_to_python', payload);
+        transcriptionServiceUsed = true;
+      }
+    }
+
+    // 3. Handle error if no appropriate transcription service is connected
+    if (!transcriptionServiceUsed) {
+        if (backendClients.whisper || backendClients.wave2vec) {
+             console.error(`❌ Correct Python client for language '${payload.language}' is not connected.`);
+             socket.emit('transcription_error', { message: `Service for '${payload.language}' is unavailable.` });
+        } else {
+             console.error("❌ No Python transcription clients are connected.");
+             socket.emit('transcription_error', { message: "Transcription service unavailable." });
+        }
     }
   });
 
   socket.on('transcription_from_python', (data) => {
+    
+    // Validate data from Python before relaying.
+    if (!data || !data.browserSocketId || !data.transcript) {
+        console.error(`Invalid transcription data from Python client.`);
+        return;
+    }
+
     console.log(`📝 Received transcription from Python for browser: ${data.browserSocketId}`);
+    // Only send to the specific browser client
     io.to(data.browserSocketId).emit('transcription_result', {
       transcript: data.transcript
     });
@@ -49,9 +144,14 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
-    if (socket.id === pythonClientId) {
-      console.log('Python client has disconnected.');
-      pythonClientId = null;
+    
+    // Clean up rate-limit map.
+    clientRateLimit.delete(socket.id);
+
+    // [MODIFIED] Clean up backend client map if a backend client disconnects
+    if (socket.backendGroup) { // Check if this was a backend client
+      console.log(`Backend client [${socket.backendGroup}] has disconnected.`);
+      backendClients[socket.backendGroup] = null;
     }
   });
 
@@ -63,5 +163,4 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`Node.js server running on port ${PORT}`);
-  console.log(`🚀 Open http://localhost:${PORT} in your browser`);
 });
