@@ -2,7 +2,10 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
-const { config } = require('dotenv'); // Use dotenv for secrets
+const { config } = require('dotenv');
+const bodyParser = require('body-parser');
+const crypto = require('crypto');
+const { validateKey, addKey } = require('./db'); // Import Firestore functions
 
 // Load .env variables
 config();
@@ -11,19 +14,12 @@ config();
 const ALLOWED_ORIGINS_STRING = process.env.ALLOWED_ORIGINS || "http://localhost:8010";
 const ALLOWED_ORIGINS_ARRAY = ALLOWED_ORIGINS_STRING.split(',');
 
-// This key MUST match the one in your python/.env file
-const PYTHON_SECRET_KEY = process.env.PYTHON_SECRET_KEY || "your-long-random-secret-key-here"; 
-
-// [FIX] Read the comma-separated list from your .env file
-const ALLOWED_ORIGINS_STRING = process.env.ALLOWED_ORIGINS || "http://localhost:8010";
-
-// This is the line that "puts it into an array"
-const ALLOWED_ORIGINS_ARRAY = ALLOWED_ORIGINS_STRING.split(',');
-
-// [FIX] Add a secret key to authenticate your Python client.
-// This prevents unauthorized clients from connecting as your backend.
-// *** YOU MUST ADD THIS SAME KEY TO YOUR transcriber.py SCRIPT ***
-const PYTHON_SECRET_KEY = "your-long-random-secret-key-here"; 
+// This key is for the ADMIN API
+const ADMIN_SECRET_KEY = process.env.ADMIN_SECRET_KEY;
+if (!ADMIN_SECRET_KEY) {
+    console.error("FATAL ERROR: ADMIN_SECRET_KEY is not set in .env file.");
+    process.exit(1);
+}
 
 const app = express();
 const server = http.createServer(app);
@@ -34,57 +30,85 @@ const io = socketIo(server, {
   }
 });
 
-// Store backend clients by group
+// Store connected backend clients by group
 let backendClients = {
   whisper: null,
   wave2vec: null,
   store: null
 };
 
-// Create a map to rate-limit clients.
+// Map for rate-limiting browser clients
 const clientRateLimit = new Map();
 
-// [FIX] Create a map to rate-limit clients.
-const clientRateLimit = new Map();
+// --- Admin API for Key Generation ---
+app.use(bodyParser.json());
+app.post('/admin/generate-key', async (req, res) => {
+    const { group, auth_secret } = req.body;
 
+    // 1. Check Admin Secret
+    if (auth_secret !== ADMIN_SECRET_KEY) {
+        return res.status(403).json({ error: "Invalid admin secret" });
+    }
+
+    // 2. Check for valid group
+    if (!group || !backendClients.hasOwnProperty(group)) {
+        return res.status(400).json({ error: "Invalid or missing 'group'" });
+    }
+
+    try {
+        // 3. Generate new key
+        const newKey = `sk_py_${crypto.randomBytes(32).toString('hex')}`;
+        
+        // 4. Add to Firestore database
+        await addKey(newKey, group);
+        
+        // 5. Return the new key
+        res.json({ apiKey: newKey, group: group });
+
+    } catch (e) {
+        res.status(500).json({ error: "Failed to generate key. Is it a duplicate?" });
+    }
+});
+
+// Serve the 'public' folder (for index.html, etc.)
 app.use(express.static(path.join(__dirname, 'public')));
 
 io.on('connection', (socket) => {
   console.log('Client connected:', socket.id);
-
-  // Set a 1-second cooldown for this client
   clientRateLimit.set(socket.id, 0);
 
-  // Handle identification for different backend groups
-  socket.on('identify_python', (data) => {
-    // Authenticate the Python client with the secret key AND group
-    if (data && data.secret === PYTHON_SECRET_KEY && data.group) {
-      
-      // Check if the group name is one we expect
-      if (backendClients.hasOwnProperty(data.group)) {
-        
-        // Assign this client to its group
-        backendClients[data.group] = socket.id;
-        
-        // Tag the socket with its group for easy disconnect cleanup
-        socket.backendGroup = data.group; 
-        
-        console.log(`✅ Python client identified for group [${data.group}]: ${socket.id}`);
-        
-      } else {
-        console.error(`❌ Invalid group name from client ${socket.id}: ${data.group}. Must be 'whisper', 'wave2vec', or 'store'.`);
+  // --- Python Worker Authentication ---
+  socket.on('identify_python', async (data) => {
+    const { apiKey, group } = data;
+    if (!apiKey || !group) {
+        console.error(`❌ FAILED auth attempt (missing key or group) from client: ${socket.id}`);
         socket.disconnect();
-      }
+        return;
+    }
+
+    // Validate key against Firestore
+    const isValid = await validateKey(apiKey, group);
+
+    if (isValid) {
+        if (backendClients.hasOwnProperty(group)) {
+            if (backendClients[group]) {
+                console.warn(`⚠️ Replacing existing client for group [${group}]: ${backendClients[group]}`);
+            }
+            backendClients[group] = socket.id;
+            socket.backendGroup = group; 
+            console.log(`✅ Python client authenticated for group [${group}]: ${socket.id}`);
+        } else {
+            console.error(`❌ Invalid group name from authenticated client ${socket.id}: ${group}`);
+            socket.disconnect();
+        }
     } else {
-      // Log and disconnect the unauthorized client.
-      console.error(`❌ FAILED auth attempt from client: ${socket.id}`);
-      socket.disconnect();
+        console.error(`❌ FAILED auth attempt (invalid key) from client: ${socket.id}`);
+        socket.disconnect();
     }
   });
 
+  // --- Browser Audio Routing ---
   socket.on('audio_data', (data) => {
-    
-    // Add Rate Limiting.
     const now = Date.now();
     const lastRequestTime = clientRateLimit.get(socket.id) || 0;
     
@@ -94,14 +118,12 @@ io.on('connection', (socket) => {
     }
     clientRateLimit.set(socket.id, now);
 
-    // Add Data Validation.
     if (!data || !Array.isArray(data.audioFloat32) || !data.language) {
       console.error(`Invalid data from browser: ${socket.id}`);
       socket.emit('transcription_error', { message: "Invalid data format." });
       return;
     }
 
-    // Define the audio payload
     const payload = {
       audioFloat32: data.audioFloat32,
       browserSocketId: socket.id,
@@ -110,13 +132,13 @@ io.on('connection', (socket) => {
 
     let transcriptionServiceUsed = false;
 
-    // 1. Always send to the 'store' group if it's connected
+    // 1. Send to 'store' if connected
     if (backendClients.store) {
       console.log(`Relaying audio to 'store' client...`);
       io.to(backendClients.store).emit('audio_to_python', payload);
     }
 
-    // 2. Send to the correct transcription group based on language
+    // 2. Route to correct transcription worker
     if (payload.language === 'malay-english' || payload.language === 'malay-only') {
       if (backendClients.whisper) {
         console.log(`Relaying audio to 'whisper' client...`);
@@ -131,41 +153,37 @@ io.on('connection', (socket) => {
       }
     }
 
-    // 3. Handle error if no appropriate transcription service is connected
+    // 3. Handle errors if no worker is connected
     if (!transcriptionServiceUsed) {
         if (!backendClients.whisper && !backendClients.wave2vec) {
              console.error("❌ No Python transcription clients are connected.");
              socket.emit('transcription_error', { message: "Transcription service unavailable." });
         } else {
-             // One is connected, but not the right one
              console.error(`❌ Correct Python client for language '${payload.language}' is not connected.`);
              socket.emit('transcription_error', { message: `Service for '${payload.language}' is unavailable.` });
         }
     }
   });
 
+  // --- Transcription Result Relaying ---
   socket.on('transcription_from_python', (data) => {
-    
-    // Validate data from Python before relaying.
     if (!data || !data.browserSocketId || data.transcript === undefined) { 
         console.error(`Invalid transcription data from Python client.`);
         return;
     }
 
     console.log(`📝 Received transcription from Python for browser: ${data.browserSocketId}`);
-    // Only send to the specific browser client
     io.to(data.browserSocketId).emit('transcription_result', {
       transcript: data.transcript
     });
   });
 
+  // --- Disconnect Handling ---
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
-    
-    // Clean up rate-limit map.
     clientRateLimit.delete(socket.id);
 
-    // Clean up backend client map if a backend client disconnects
+    // If a Python worker disconnects, free up its group slot
     if (socket.backendGroup) { 
       console.log(`Backend client [${socket.backendGroup}] has disconnected.`);
       backendClients[socket.backendGroup] = null;
