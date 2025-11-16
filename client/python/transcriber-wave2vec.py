@@ -1,29 +1,36 @@
 import socketio
-import whisper
 import numpy as np
 import soundfile as sf
 from datetime import datetime
 import os
 import time
 import traceback
-from dotenv import load_dotenv # <-- ADD THIS
+import torch
+from transformers import pipeline, Wav2Vec2ForCTC, Wav2Vec2Processor
+from dotenv import load_dotenv
 
 # --- Configuration ---
 NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3000")
 UPLOAD_DIR = "audio_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
-PYTHON_SECRET_KEY = os.getenv("PYTHON_SECRET_KEY") # From server-latest.js
-MODEL_SIZE = "tiny" # <-- THE ONLY LINE TO CHANGE FOR OTHER FILES
 
-# Add a quick check to make sure the key loaded
+load_dotenv() # Load from .env file
+PYTHON_SECRET_KEY = os.getenv("PYTHON_SECRET_KEY")
+
+MODEL_NAME = "facebook/wav2vec2-base-960h" 
+
+# Add a check for the key
 if not PYTHON_SECRET_KEY:
     raise ValueError("PYTHON_SECRET_KEY not found in .env file. Please create it.")
-    
-# --- Initialize Whisper Model ---
-print(f"Loading Whisper model '{MODEL_SIZE}' on CUDA...")
-# Use device="cuda" to leverage your RTX 3060
-model = whisper.load_model(MODEL_SIZE, device="cuda")
-print(f"✅ Whisper model '{MODEL_SIZE}' loaded on GPU.")
+
+# --- Initialize Hugging Face Pipeline ---
+print(f"Loading Hugging Face model '{MODEL_NAME}' on CUDA...")
+# Wav2Vec benefits from float32 for stability, but we can try float16
+# We also explicitly load the processor and model to ensure correct setup
+processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
+model = Wav2Vec2ForCTC.from_pretrained(MODEL_NAME).to(torch.float16).to("cuda")
+
+print(f"✅ Hugging Face model '{MODEL_NAME}' loaded on GPU.")
 
 # --- Initialize Socket.IO Client ---
 sio = socketio.Client()
@@ -43,10 +50,10 @@ def enhance_transcription(text):
 @sio.event
 def connect():
     print("✅ Successfully connected to Node.js server.")
-    # Identify this client to the 'whisper' group
+    # Identify this client to the 'wave2vec' group
     sio.emit('identify_python', {
         'secret': PYTHON_SECRET_KEY,
-        'group': 'whisper' 
+        'group': 'wave2vec' 
     })
 
 @sio.event
@@ -60,34 +67,32 @@ def disconnect():
 @sio.on('audio_to_python')
 def on_audio_to_python(data):
     browser_socket_id = data['browserSocketId']
-    language_mode = data.get('language', 'malay-english')
     
-    print(f"\n🎤 Received audio from browser client: {browser_socket_id}")
-    print(f"📋 Language mode: {language_mode}")
+    print(f"\n🎤 Received audio from browser client: {browser_socket_id} for 'english-only'")
     
     try:
         audio_data = np.array(data['audioFloat32']).astype(np.float32)
-        print(f"Transcribing ({MODEL_SIZE} model)...")
+        print(f"Transcribing ({MODEL_NAME})...")
         
-        # --- NEW: Set transcription options based on frontend ---
-        transcribe_options = {}
-        if language_mode == 'english-only':
-            transcribe_options['language'] = 'en'
-        elif language_mode == 'malay-only':
-            transcribe_options['language'] = 'ms'
-        # For 'malay-english', we don't set a language,
-        # which tells Whisper to auto-detect. This is best for code-switching.
+        # --- Transcribe using Wav2Vec2 ---
+        # 1. Process the audio (resample if needed, though it's 16k)
+        input_values = processor(audio_data, sampling_rate=16000, return_tensors="pt").input_values
+        input_values = input_values.to(torch.float16).to("cuda")
 
-        # Transcribe using the loaded CUDA model and options
-        result = model.transcribe(audio_data, **transcribe_options)
+        # 2. Get model logits (predictions)
+        with torch.no_grad():
+            logits = model(input_values).logits
+
+        # 3. Decode the logits to text
+        predicted_ids = torch.argmax(logits, dim=-1)
+        raw_transcription = processor.batch_decode(predicted_ids)[0]
         
-        raw_transcription = result.get('text', '').strip()
+        # Wav2Vec models output in ALL CAPS
+        raw_transcription = raw_transcription.lower()
         print(f"📝 Raw transcription: {raw_transcription}")
 
-        # Clean up the text for display (e.g., capitalization)
         processed_transcription = enhance_transcription(raw_transcription)
 
-        # Save the raw audio and transcription
         save_audio_and_transcription(audio_data, raw_transcription)
 
         # Send the PLAIN TEXT result back
@@ -109,11 +114,9 @@ def save_audio_and_transcription(audio_data, raw_transcription):
     """Saves the audio and the raw transcription text."""
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     try:
-        # Save audio file
         audio_filename = os.path.join(UPLOAD_DIR, f"audio_{timestamp}.wav")
         sf.write(audio_filename, audio_data, 16000)
         
-        # Save raw transcription file
         txt_filename = os.path.join(UPLOAD_DIR, f"transcription_{timestamp}.txt")
         with open(txt_filename, 'w', encoding='utf-8') as f:
             f.write(f"Raw: {raw_transcription}\n")

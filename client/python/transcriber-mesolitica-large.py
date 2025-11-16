@@ -10,7 +10,7 @@ from transformers import pipeline
 from dotenv import load_dotenv # <-- ADD THIS
 
 # --- Configuration ---
-NODE_SERVER_URL = "http://localhost:3000"
+NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3000")
 UPLOAD_DIR = "audio_uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 PYTHON_SECRET_KEY = os.getenv("PYTHON_SECRET_KEY") # From server-latest.js

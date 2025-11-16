@@ -8,7 +8,7 @@ import traceback
 from dotenv import load_dotenv # <-- ADD THIS
 
 # --- Configuration ---
-NODE_SERVER_URL = "http://localhost:3000"
+NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3000")
 UPLOAD_DIR = "audio_uploads_flac"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 

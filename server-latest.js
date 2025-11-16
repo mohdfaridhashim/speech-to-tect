@@ -2,15 +2,17 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const path = require('path');
+const { config } = require('dotenv'); // Use dotenv for secrets
+
+// Load .env variables
+config();
 
 // Read the comma-separated list from your .env file
 const ALLOWED_ORIGINS_STRING = process.env.ALLOWED_ORIGINS || "http://localhost:8010";
-
-// This is the line that "puts it into an array"
 const ALLOWED_ORIGINS_ARRAY = ALLOWED_ORIGINS_STRING.split(',');
 
-// Add a secret key to authenticate your Python client.
-const PYTHON_SECRET_KEY = "your-long-random-secret-key-here"; 
+// This key MUST match the one in your python/.env file
+const PYTHON_SECRET_KEY = process.env.PYTHON_SECRET_KEY || "your-long-random-secret-key-here"; 
 
 const app = express();
 const server = http.createServer(app);
@@ -21,10 +23,10 @@ const io = socketIo(server, {
   }
 });
 
-// [MODIFIED] Store backend clients by group
+// [UPDATED] Store backend clients by group. wave2vec is back.
 let backendClients = {
   whisper: null,
-  wave2vec: null, // Renamed from "wave2e"
+  wave2vec: null, // <-- ADDED THIS BACK
   store: null
 };
 
@@ -39,7 +41,7 @@ io.on('connection', (socket) => {
   // Set a 1-second cooldown for this client
   clientRateLimit.set(socket.id, 0);
 
-  // [MODIFIED] Handle identification for different backend groups
+  // Handle identification for different backend groups
   socket.on('identify_python', (data) => {
     // Authenticate the Python client with the secret key AND group
     if (data && data.secret === PYTHON_SECRET_KEY && data.group) {
@@ -50,13 +52,13 @@ io.on('connection', (socket) => {
         // Assign this client to its group
         backendClients[data.group] = socket.id;
         
-        // [NEW] Tag the socket with its group for easy disconnect cleanup
+        // Tag the socket with its group for easy disconnect cleanup
         socket.backendGroup = data.group; 
         
         console.log(`✅ Python client identified for group [${data.group}]: ${socket.id}`);
         
       } else {
-        console.error(`❌ Invalid group name from client ${socket.id}: ${data.group}`);
+        console.error(`❌ Invalid group name from client ${socket.id}: ${data.group}. Must be 'whisper', 'wave2vec', or 'store'.`);
         socket.disconnect();
       }
     } else {
@@ -85,7 +87,7 @@ io.on('connection', (socket) => {
       return;
     }
 
-    // [MODIFIED] Route audio to the correct backend groups
+    // [UPDATED] Route audio to all connected backend groups
     const payload = {
       audioFloat32: data.audioFloat32,
       browserSocketId: socket.id,
@@ -100,7 +102,7 @@ io.on('connection', (socket) => {
       io.to(backendClients.store).emit('audio_to_python', payload);
     }
 
-    // 2. Send to the correct transcription group based on language
+    // 2. [UPDATED] Send to the correct transcription group based on language
     if (payload.language === 'malay-english' || payload.language === 'malay-only') {
       if (backendClients.whisper) {
         console.log(`Relaying audio to 'whisper' client...`);
@@ -117,12 +119,12 @@ io.on('connection', (socket) => {
 
     // 3. Handle error if no appropriate transcription service is connected
     if (!transcriptionServiceUsed) {
-        if (backendClients.whisper || backendClients.wave2vec) {
-             console.error(`❌ Correct Python client for language '${payload.language}' is not connected.`);
-             socket.emit('transcription_error', { message: `Service for '${payload.language}' is unavailable.` });
-        } else {
+        if (!backendClients.whisper && !backendClients.wave2vec) {
              console.error("❌ No Python transcription clients are connected.");
              socket.emit('transcription_error', { message: "Transcription service unavailable." });
+        } else {
+             console.error(`❌ Correct Python client for language '${payload.language}' is not connected.`);
+             socket.emit('transcription_error', { message: `Service for '${payload.language}' is unavailable.` });
         }
     }
   });
@@ -130,13 +132,12 @@ io.on('connection', (socket) => {
   socket.on('transcription_from_python', (data) => {
     
     // Validate data from Python before relaying.
-    if (!data || !data.browserSocketId || !data.transcript) {
+    if (!data || !data.browserSocketId || data.transcript === undefined) { 
         console.error(`Invalid transcription data from Python client.`);
         return;
     }
 
     console.log(`📝 Received transcription from Python for browser: ${data.browserSocketId}`);
-    // Only send to the specific browser client
     io.to(data.browserSocketId).emit('transcription_result', {
       transcript: data.transcript
     });
@@ -145,11 +146,9 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     console.log('Client disconnected:', socket.id);
     
-    // Clean up rate-limit map.
     clientRateLimit.delete(socket.id);
 
-    // [MODIFIED] Clean up backend client map if a backend client disconnects
-    if (socket.backendGroup) { // Check if this was a backend client
+    if (socket.backendGroup) { 
       console.log(`Backend client [${socket.backendGroup}] has disconnected.`);
       backendClients[socket.backendGroup] = null;
     }
