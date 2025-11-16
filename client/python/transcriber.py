@@ -6,6 +6,7 @@ from datetime import datetime
 import os
 import time
 import re
+from dotenv import load_dotenv # <-- ADD THIS
 
 # --- Configuration ---
 NODE_SERVER_URL = "http://localhost:3000"

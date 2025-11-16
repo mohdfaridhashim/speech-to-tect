@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 import time
 import traceback
+from dotenv import load_dotenv # <-- ADD THIS
 
 # --- Configuration ---
 NODE_SERVER_URL = "http://localhost:3000"
@@ -12,8 +13,11 @@ UPLOAD_DIR = "audio_uploads_flac"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 # This key MUST match the one in your server-latest.js
-PYTHON_SECRET_KEY = "your-long-random-secret-key-here"
+PYTHON_SECRET_KEY = os.getenv("PYTHON_SECRET_KEY")
 
+# Add a quick check to make sure the key loaded
+if not PYTHON_SECRET_KEY:
+    raise ValueError("PYTHON_SECRET_KEY not found in .env file. Please create it.")
 # --- Initialize Socket.IO Client ---
 sio = socketio.Client()
 
