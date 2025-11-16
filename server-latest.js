@@ -14,6 +14,17 @@ const ALLOWED_ORIGINS_ARRAY = ALLOWED_ORIGINS_STRING.split(',');
 // This key MUST match the one in your python/.env file
 const PYTHON_SECRET_KEY = process.env.PYTHON_SECRET_KEY || "your-long-random-secret-key-here"; 
 
+// [FIX] Read the comma-separated list from your .env file
+const ALLOWED_ORIGINS_STRING = process.env.ALLOWED_ORIGINS || "http://localhost:8010";
+
+// This is the line that "puts it into an array"
+const ALLOWED_ORIGINS_ARRAY = ALLOWED_ORIGINS_STRING.split(',');
+
+// [FIX] Add a secret key to authenticate your Python client.
+// This prevents unauthorized clients from connecting as your backend.
+// *** YOU MUST ADD THIS SAME KEY TO YOUR transcriber.py SCRIPT ***
+const PYTHON_SECRET_KEY = "your-long-random-secret-key-here"; 
+
 const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
@@ -31,6 +42,9 @@ let backendClients = {
 };
 
 // Create a map to rate-limit clients.
+const clientRateLimit = new Map();
+
+// [FIX] Create a map to rate-limit clients.
 const clientRateLimit = new Map();
 
 app.use(express.static(path.join(__dirname, 'public')));
