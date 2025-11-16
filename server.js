@@ -33,13 +33,14 @@ io.on('connection', (socket) => {
     let processedText = data.transcript;
     
     // Apply language-specific processing
-    if (clientPreferences.get(socket.id).language === 'malay-english') {
+    /*if (clientPreferences.get(socket.id).language === 'malay-english') {
       processedText = processMixedLanguage(data.transcript);
     } else if (clientPreferences.get(socket.id).language === 'malay-only') {
       processedText = processMalayLanguage(data.transcript);
     } else if (clientPreferences.get(socket.id).language === 'english-only') {
       processedText = processEnglishLanguage(data.transcript);
-    }
+    }*/
+    processedText = processEnglishLanguage(data.transcript);
     
     // Simulate processing delay
     setTimeout(() => {
@@ -153,14 +154,19 @@ app.post('/api/transcribe', express.json(), (req, res) => {
   let processedText;
   switch (language) {
     case 'malay-only':
-      processedText = processMalayLanguage(text);
+      //processedText = processMalayLanguage(text);
+	processedText = processEnglishLanguage(text);
       break;
     case 'english-only':
       processedText = processEnglishLanguage(text);
       break;
     case 'malay-english':
+      //processedText = processMixedLanguage(text);
+      processedText = processEnglishLanguage(text);
+      break;
     default:
-      processedText = processMixedLanguage(text);
+      //processedText = processMixedLanguage(text);
+      processedText = processEnglishLanguage(text);
   }
   
   res.json({
