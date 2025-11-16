@@ -1,165 +1,135 @@
-const express = require('express');
-const http = require('http');
-const socketIo = require('socket.io');
-const path = require('path');
-const { config } = require('dotenv'); // Use dotenv for secrets
+import socketio
+import numpy as np
+import soundfile as sf
+from datetime import datetime
+import os
+import time
+import traceback
+import torch
+from transformers import pipeline, Wav2Vec2ForCTC, Wav2Vec2Processor
+from dotenv import load_dotenv
 
-// Load .env variables
-config();
+# --- Configuration ---
+load_dotenv() # Load from .env file
 
-// Read the comma-separated list from your .env file
-const ALLOWED_ORIGINS_STRING = process.env.ALLOWED_ORIGINS || "http://localhost:8010";
-const ALLOWED_ORIGINS_ARRAY = ALLOWED_ORIGINS_STRING.split(',');
+# Load Node server URL from .env, with a default fallback
+NODE_SERVER_URL = os.getenv("NODE_SERVER_URL", "http://localhost:3000")
+UPLOAD_DIR = "audio_uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-// This key MUST match the one in your python/.env file
-const PYTHON_SECRET_KEY = process.env.PYTHON_SECRET_KEY || "your-long-random-secret-key-here"; 
+PYTHON_SECRET_KEY = os.getenv("PYTHON_SECRET_KEY")
+MODEL_NAME = "facebook/wav2vec2-base-960h" 
 
-const app = express();
-const server = http.createServer(app);
-const io = socketIo(server, {
-  cors: {
-    origin: ALLOWED_ORIGINS_ARRAY,
-    methods: ["GET", "POST"]
-  }
-});
+# Add a check for the key
+if not PYTHON_SECRET_KEY:
+    raise ValueError("PYTHON_SECRET_KEY not found in .env file. Please create it.")
 
-// [UPDATED] Store backend clients by group. wave2vec is back.
-let backendClients = {
-  whisper: null,
-  wave2vec: null, // <-- ADDED THIS BACK
-  store: null
-};
+# --- Initialize Hugging Face Pipeline ---
+print(f"Loading Hugging Face model '{MODEL_NAME}' on CUDA...")
+processor = Wav2Vec2Processor.from_pretrained(MODEL_NAME)
+model = Wav2Vec2ForCTC.from_pretrained(MODEL_NAME).to(torch.float16).to("cuda")
 
-// Create a map to rate-limit clients.
-const clientRateLimit = new Map();
+print(f"✅ Hugging Face model '{MODEL_NAME}' loaded on GPU.")
 
-app.use(express.static(path.join(__dirname, 'public')));
+# --- Initialize Socket.IO Client ---
+sio = socketio.Client()
 
-io.on('connection', (socket) => {
-  console.log('Client connected:', socket.id);
-
-  // Set a 1-second cooldown for this client
-  clientRateLimit.set(socket.id, 0);
-
-  // Handle identification for different backend groups
-  socket.on('identify_python', (data) => {
-    // Authenticate the Python client with the secret key AND group
-    if (data && data.secret === PYTHON_SECRET_KEY && data.group) {
-      
-      // Check if the group name is one we expect
-      if (backendClients.hasOwnProperty(data.group)) {
-        
-        // Assign this client to its group
-        backendClients[data.group] = socket.id;
-        
-        // Tag the socket with its group for easy disconnect cleanup
-        socket.backendGroup = data.group; 
-        
-        console.log(`✅ Python client identified for group [${data.group}]: ${socket.id}`);
-        
-      } else {
-        console.error(`❌ Invalid group name from client ${socket.id}: ${data.group}. Must be 'whisper', 'wave2vec', or 'store'.`);
-        socket.disconnect();
-      }
-    } else {
-      // Log and disconnect the unauthorized client.
-      console.error(`❌ FAILED auth attempt from client: ${socket.id}`);
-      socket.disconnect();
-    }
-  });
-
-  socket.on('audio_data', (data) => {
+# --- Simplified Transcription Cleanup ---
+def enhance_transcription(text):
+    """Clean up the raw transcription text for display"""
+    text = text.strip()
+    if not text:
+        return "[No speech detected]"
     
-    // Add Rate Limiting.
-    const now = Date.now();
-    const lastRequestTime = clientRateLimit.get(socket.id) || 0;
+    # Capitalize first letter
+    text = text[0].upper() + text[1:] if text else text
+    return text
+
+# --- Socket.IO Event Handlers ---
+@sio.event
+def connect():
+    print("✅ Successfully connected to Node.js server.")
+    # Identify this client to the 'wave2vec' group
+    sio.emit('identify_python', {
+        'secret': PYTHON_SECRET_KEY,
+        'group': 'wave2vec' 
+    })
+
+@sio.event
+def connect_error(data):
+    print(f"❌ Connection to Node.js server failed: {data}")
+
+@sio.event
+def disconnect():
+    print("Disconnected from Node.js server.")
+
+@sio.on('audio_to_python')
+def on_audio_to_python(data):
+    browser_socket_id = data['browserSocketId']
     
-    if (now - lastRequestTime < 1000) {
-      console.warn(`Rate limit hit for client: ${socket.id}`);
-      return; 
-    }
-    clientRateLimit.set(socket.id, now);
-
-    // Add Data Validation.
-    if (!data || !Array.isArray(data.audioFloat32) || !data.language) {
-      console.error(`Invalid data from browser: ${socket.id}`);
-      socket.emit('transcription_error', { message: "Invalid data format." });
-      return;
-    }
-
-    // [UPDATED] Route audio to all connected backend groups
-    const payload = {
-      audioFloat32: data.audioFloat32,
-      browserSocketId: socket.id,
-      language: data.language
-    };
-
-    let transcriptionServiceUsed = false;
-
-    // 1. Always send to the 'store' group if it's connected
-    if (backendClients.store) {
-      console.log(`Relaying audio to 'store' client...`);
-      io.to(backendClients.store).emit('audio_to_python', payload);
-    }
-
-    // 2. [UPDATED] Send to the correct transcription group based on language
-    if (payload.language === 'malay-english' || payload.language === 'malay-only') {
-      if (backendClients.whisper) {
-        console.log(`Relaying audio to 'whisper' client...`);
-        io.to(backendClients.whisper).emit('audio_to_python', payload);
-        transcriptionServiceUsed = true;
-      }
-    } else if (payload.language === 'english-only') {
-      if (backendClients.wave2vec) {
-        console.log(`Relaying audio to 'wave2vec' client...`);
-        io.to(backendClients.wave2vec).emit('audio_to_python', payload);
-        transcriptionServiceUsed = true;
-      }
-    }
-
-    // 3. Handle error if no appropriate transcription service is connected
-    if (!transcriptionServiceUsed) {
-        if (!backendClients.whisper && !backendClients.wave2vec) {
-             console.error("❌ No Python transcription clients are connected.");
-             socket.emit('transcription_error', { message: "Transcription service unavailable." });
-        } else {
-             console.error(`❌ Correct Python client for language '${payload.language}' is not connected.`);
-             socket.emit('transcription_error', { message: `Service for '${payload.language}' is unavailable.` });
-        }
-    }
-  });
-
-  socket.on('transcription_from_python', (data) => {
+    print(f"\n🎤 Received audio from browser client: {browser_socket_id} for 'english-only'")
     
-    // Validate data from Python before relaying.
-    if (!data || !data.browserSocketId || data.transcript === undefined) { 
-        console.error(`Invalid transcription data from Python client.`);
-        return;
-    }
+    try:
+        audio_data = np.array(data['audioFloat32']).astype(np.float32)
+        print(f"Transcribing ({MODEL_NAME})...")
+        
+        # --- Transcribe using Wav2Vec2 ---
+        input_values = processor(audio_data, sampling_rate=16000, return_tensors="pt").input_values
+        input_values = input_values.to(torch.float16).to("cuda")
 
-    console.log(`📝 Received transcription from Python for browser: ${data.browserSocketId}`);
-    io.to(data.browserSocketId).emit('transcription_result', {
-      transcript: data.transcript
-    });
-  });
+        with torch.no_grad():
+            logits = model(input_values).logits
 
-  socket.on('disconnect', () => {
-    console.log('Client disconnected:', socket.id);
-    
-    clientRateLimit.delete(socket.id);
+        predicted_ids = torch.argmax(logits, dim=-1)
+        raw_transcription = processor.batch_decode(predicted_ids)[0]
+        
+        raw_transcription = raw_transcription.lower()
+        print(f"📝 Raw transcription: {raw_transcription}")
 
-    if (socket.backendGroup) { 
-      console.log(`Backend client [${socket.backendGroup}] has disconnected.`);
-      backendClients[socket.backendGroup] = null;
-    }
-  });
+        processed_transcription = enhance_transcription(raw_transcription)
 
-  socket.on('error', (error) => {
-    console.error('Socket error:', error);
-  });
-});
+        save_audio_and_transcription(audio_data, raw_transcription)
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`Node.js server running on port ${PORT}`);
-});
+        sio.emit('transcription_from_python', {
+            'transcript': processed_transcription,
+            'browserSocketId': browser_socket_id,
+            'raw_transcript': raw_transcription
+        })
+        
+    except Exception as e:
+        print(f"❌ An error occurred during transcription: {e}")
+        traceback.print_exc()
+        sio.emit('transcription_error', {
+            'browserSocketId': browser_socket_id,
+            'error': str(e)
+        })
+
+def save_audio_and_transcription(audio_data, raw_transcription):
+    """Saves the audio and the raw transcription text."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    try:
+        audio_filename = os.path.join(UPLOAD_DIR, f"audio_{timestamp}.wav")
+        sf.write(audio_filename, audio_data, 16000)
+        
+        txt_filename = os.path.join(UPLOAD_DIR, f"transcription_{timestamp}.txt")
+        with open(txt_filename, 'w', encoding='utf-8') as f:
+            f.write(f"Raw: {raw_transcription}\n")
+        print(f"✅ Audio/Transcription saved.")
+
+    except Exception as e:
+        print(f"❌ Error saving audio/text file: {e}")
+
+# --- Main Entry Point ---
+if __name__ == '__main__':
+    while True:
+        try:
+            # The URL is now loaded from the .env file
+            print(f"Attempting to connect to Node.js server at {NODE_SERVER_URL}...")
+            sio.connect(NODE_SERVER_URL, transports=['websocket'])
+            sio.wait()
+        except socketio.exceptions.ConnectionError as e:
+            print(f"Connection failed: {e}. Retrying in 5 seconds...")
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\n👋 Shutting down...")
+            break
