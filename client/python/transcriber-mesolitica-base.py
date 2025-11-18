@@ -54,7 +54,7 @@ def connect():
     # We connect to the SAME 'whisper' group.
     # The node.js server will send 'malay-english' audio to this script.
     sio.emit('identify_python', {
-        'secret': PYTHON_SECRET_KEY,
+        'apiKey': PYTHON_SECRET_KEY, # <-- FIX: Changed 'secret' to 'apiKey'
         'group': 'whisper' 
     })
 

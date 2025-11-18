@@ -52,7 +52,7 @@ def connect():
     print("✅ Successfully connected to Node.js server.")
     # Identify this client to the 'wave2vec' group
     sio.emit('identify_python', {
-        'secret': PYTHON_SECRET_KEY,
+        'apiKey': PYTHON_SECRET_KEY, # <-- FIX: Changed 'secret' to 'apiKey'
         'group': 'wave2vec' 
     })
 
